@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <climits>
 #include <queue>
+#include <cmath>
+#include <map>
 
 extern int rows;
 extern int columns;
@@ -15,7 +17,6 @@ extern int total_mines;
 
 void Execute(int r, int c, int type);
 
-// Client game state
 char **known_map;
 bool **is_mine;
 bool **is_safe;
@@ -170,7 +171,7 @@ bool applyAdvancedRules() {
       auto& ca = constraints[a];
       auto& cb = constraints[b];
 
-      bool is_subset = true;
+      bool ca_sub_cb = true;
       for (auto& cell : ca.cells) {
         bool found = false;
         for (auto& cell2 : cb.cells) {
@@ -179,12 +180,11 @@ bool applyAdvancedRules() {
             break;
           }
         }
-        if (!found) { is_subset = false; break; }
+        if (!found) { ca_sub_cb = false; break; }
       }
 
-      if (!is_subset) {
-        // Also check if cb is subset of ca
-        is_subset = true;
+      if (ca_sub_cb) {
+        std::vector<std::pair<int,int>> diff;
         for (auto& cell : cb.cells) {
           bool found = false;
           for (auto& cell2 : ca.cells) {
@@ -193,25 +193,9 @@ bool applyAdvancedRules() {
               break;
             }
           }
-          if (!found) { is_subset = false; break; }
-        }
-        if (!is_subset) continue;
-
-        // cb is subset of ca
-        std::vector<std::pair<int,int>> diff;
-        for (auto& cell : ca.cells) {
-          bool found = false;
-          for (auto& cell2 : cb.cells) {
-            if (cell.first == cell2.first && cell.second == cell2.second) {
-              found = true;
-              break;
-            }
-          }
           if (!found) diff.push_back(cell);
         }
-
-        int mine_diff = ca.mines - cb.mines;
-
+        int mine_diff = cb.mines - ca.mines;
         if (mine_diff == 0 && !diff.empty()) {
           for (auto& p : diff) {
             if (!is_safe[p.first][p.second]) {
@@ -232,8 +216,7 @@ bool applyAdvancedRules() {
         continue;
       }
 
-      // ca is subset of cb
-      std::vector<std::pair<int,int>> diff;
+      bool cb_sub_ca = true;
       for (auto& cell : cb.cells) {
         bool found = false;
         for (auto& cell2 : ca.cells) {
@@ -242,25 +225,37 @@ bool applyAdvancedRules() {
             break;
           }
         }
-        if (!found) diff.push_back(cell);
+        if (!found) { cb_sub_ca = false; break; }
       }
 
-      int mine_diff = cb.mines - ca.mines;
-
-      if (mine_diff == 0 && !diff.empty()) {
-        for (auto& p : diff) {
-          if (!is_safe[p.first][p.second]) {
-            is_safe[p.first][p.second] = true;
-            acted = true;
+      if (cb_sub_ca) {
+        std::vector<std::pair<int,int>> diff;
+        for (auto& cell : ca.cells) {
+          bool found = false;
+          for (auto& cell2 : cb.cells) {
+            if (cell.first == cell2.first && cell.second == cell2.second) {
+              found = true;
+              break;
+            }
           }
+          if (!found) diff.push_back(cell);
         }
-      } else if (mine_diff == (int)diff.size() && !diff.empty()) {
-        for (auto& p : diff) {
-          if (!is_mine[p.first][p.second]) {
-            is_mine[p.first][p.second] = true;
-            is_safe[p.first][p.second] = true;
-            ++flagged_count;
-            acted = true;
+        int mine_diff = ca.mines - cb.mines;
+        if (mine_diff == 0 && !diff.empty()) {
+          for (auto& p : diff) {
+            if (!is_safe[p.first][p.second]) {
+              is_safe[p.first][p.second] = true;
+              acted = true;
+            }
+          }
+        } else if (mine_diff == (int)diff.size() && !diff.empty()) {
+          for (auto& p : diff) {
+            if (!is_mine[p.first][p.second]) {
+              is_mine[p.first][p.second] = true;
+              is_safe[p.first][p.second] = true;
+              ++flagged_count;
+              acted = true;
+            }
           }
         }
       }
@@ -315,70 +310,47 @@ bool getAutoExploreTarget(int& r, int& c) {
   return false;
 }
 
-// Compute a local probability for each unknown cell using BFS from constraints
-void computeProbabilities(double** prob) {
-  int remaining_mines = total_mines - flagged_count;
-  int unknown_cells = countTotalUnknown();
-  double global_prob = (double)remaining_mines / std::max(1, unknown_cells);
-
-  // For each unknown cell, find the minimum possible mine probability
-  // based on adjacent constraints
-  for (int i = 0; i < rows; ++i) {
-    for (int j = 0; j < columns; ++j) {
-      if (is_safe[i][j]) {
-        prob[i][j] = is_mine[i][j] ? 1.0 : 0.0;
-        continue;
-      }
-
-      // Check adjacent constraints
-      double min_local = 1.0;
-      bool has_constraint = false;
-
-      for (int k = 0; k < 8; ++k) {
-        int ni = i + dr[k], nj = j + dc[k];
-        if (ni >= 0 && ni < rows && nj >= 0 && nj < columns && cell_visited[ni][nj]) {
-          int num = known_map[ni][nj] - '0';
-          if (num >= 0 && num <= 8) {
-            int flagged = countFlagged(ni, nj);
-            int unk = countUnknown(ni, nj);
-            if (unk > 0) {
-              has_constraint = true;
-              double local = (double)(num - flagged) / unk;
-              if (local < min_local) min_local = local;
-            }
-          }
-        }
-      }
-
-      if (has_constraint) {
-        prob[i][j] = min_local;
-      } else {
-        // No adjacent constraints - use global probability
-        prob[i][j] = global_prob;
-      }
-    }
-  }
-}
-
-// Find the best cell to visit when we must guess
+// Find the best cell to guess using constraint-based probability
 void findBestGuess(int& r, int& c) {
   int remaining_mines = total_mines - flagged_count;
   int unknown_cells = countTotalUnknown();
-  double global_prob = (double)remaining_mines / std::max(1, unknown_cells);
+  double global_prob = unknown_cells > 0 ? (double)remaining_mines / unknown_cells : 0.0;
 
-  double** prob = new double*[rows];
-  for (int i = 0; i < rows; ++i) prob[i] = new double[columns];
-  computeProbabilities(prob);
+  // Build constraints
+  struct Constraint {
+    std::vector<std::pair<int,int>> cells;
+    int mines;
+  };
 
-  double best_prob = 1.0;
+  std::vector<Constraint> constraints;
+
+  for (int i = 0; i < rows; ++i) {
+    for (int j = 0; j < columns; ++j) {
+      if (!cell_visited[i][j]) continue;
+      int num = known_map[i][j] - '0';
+      if (num < 0 || num > 8) continue;
+      int flagged = countFlagged(i, j);
+      int remaining = num - flagged;
+      if (remaining < 0) continue;
+
+      Constraint c;
+      getUnknownNeighbors(i, j, c.cells);
+      c.mines = remaining;
+      if (!c.cells.empty()) {
+        constraints.push_back(c);
+      }
+    }
+  }
+
+  // Compute per-cell probability
+  double best_score = -1e9;
   int best_r = -1, best_c = -1;
-  bool best_adjacent = false;
 
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < columns; ++j) {
       if (is_safe[i][j]) continue;
 
-      double p = prob[i][j];
+      // Check if adjacent to visited
       bool adjacent = false;
       for (int k = 0; k < 8; ++k) {
         int ni = i + dr[k], nj = j + dc[k];
@@ -388,17 +360,37 @@ void findBestGuess(int& r, int& c) {
         }
       }
 
-      if (p < best_prob || (p == best_prob && adjacent && !best_adjacent)) {
-        best_prob = p;
+      double p;
+      if (adjacent) {
+        // Compute probability from adjacent constraints
+        double min_prob = 1.0;
+        for (auto& c : constraints) {
+          bool found = false;
+          for (auto& cell : c.cells) {
+            if (cell.first == i && cell.second == j) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) continue;
+          double local_prob = (double)c.mines / c.cells.size();
+          if (local_prob < min_prob) min_prob = local_prob;
+        }
+        p = min_prob;
+      } else {
+        p = global_prob;
+      }
+
+      double score = -p;
+      if (adjacent) score += 1e-9;
+
+      if (score > best_score) {
+        best_score = score;
         best_r = i;
         best_c = j;
-        best_adjacent = adjacent;
       }
     }
   }
-
-  for (int i = 0; i < rows; ++i) delete[] prob[i];
-  delete[] prob;
 
   if (best_r >= 0) {
     r = best_r;
@@ -414,47 +406,20 @@ void Decide() {
   extern int game_state;
   if (game_state != 0) return;
 
-  // Phase 1: Apply deduction rules exhaustively
   while (applyBasicRules() || applyAdvancedRules()) {
     int mr, mc;
-
-    if (getMineToMark(mr, mc)) {
-      Execute(mr, mc, 1);
-      return;
-    }
-
-    if (getAutoExploreTarget(mr, mc)) {
-      Execute(mr, mc, 2);
-      return;
-    }
-
-    if (getSafeUnvisited(mr, mc)) {
-      Execute(mr, mc, 0);
-      return;
-    }
+    if (getMineToMark(mr, mc)) { Execute(mr, mc, 1); return; }
+    if (getAutoExploreTarget(mr, mc)) { Execute(mr, mc, 2); return; }
+    if (getSafeUnvisited(mr, mc)) { Execute(mr, mc, 0); return; }
   }
 
-  // Phase 2: Auto-explore on cells with matching flags
   int ar, ac;
-  if (getAutoExploreTarget(ar, ac)) {
-    Execute(ar, ac, 2);
-    return;
-  }
+  if (getAutoExploreTarget(ar, ac)) { Execute(ar, ac, 2); return; }
 
-  // Phase 3: Mark deduced mines
   int mr, mc;
-  if (getMineToMark(mr, mc)) {
-    Execute(mr, mc, 1);
-    return;
-  }
+  if (getMineToMark(mr, mc)) { Execute(mr, mc, 1); return; }
+  if (getSafeUnvisited(mr, mc)) { Execute(mr, mc, 0); return; }
 
-  // Phase 4: Visit deduced safe cells
-  if (getSafeUnvisited(mr, mc)) {
-    Execute(mr, mc, 0);
-    return;
-  }
-
-  // Phase 5: Guess the safest cell
   int gr, gc;
   findBestGuess(gr, gc);
   Execute(gr, gc, 0);
